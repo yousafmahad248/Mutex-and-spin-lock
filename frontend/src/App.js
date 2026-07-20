@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import './index.css';
 
-const API_BASE = process.env.REACT_APP_API_URL || 'https://mutex-and-spin-lock.onrender.com';
+// Remove /api/mutex or /api/spinlock suffix from API_BASE to avoid double path
+const RAW_API_BASE = process.env.REACT_APP_API_URL || 'https://mutex-and-spin-lock.onrender.com';
+const API_BASE = RAW_API_BASE.replace(/\/api\/(mutex|spinlock)$/, '');
 
 function App() {
   const [mode, setMode] = useState('mutex'); // 'mutex' or 'spinlock'
