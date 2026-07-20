@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import './index.css';
 
@@ -13,21 +13,7 @@ function App() {
   const [spinCounts, setSpinCounts] = useState({});
   const spinIntervalsRef = useRef({});
 
-  // Fetch status periodically
-  useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 800);
-    return () => clearInterval(interval);
-  }, [mode]);
-
-  // Cleanup spin intervals on unmount
-  useEffect(() => {
-    return () => {
-      Object.values(spinIntervalsRef.current).forEach(clearInterval);
-    };
-  }, []);
-
-  const fetchStatus = async () => {
+  const fetchStatus = useCallback(async () => {
     try {
       // Use /api/mutex/status for both modes
       const response = await axios.get(`${API_BASE}/api/mutex/status`);
@@ -42,7 +28,21 @@ function App() {
     } catch (error) {
       console.error('Error fetching status:', error);
     }
-  };
+  }, [API_BASE, mode]);
+
+  // Fetch status periodically
+  useEffect(() => {
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 800);
+    return () => clearInterval(interval);
+  }, [fetchStatus]);
+
+  // Cleanup spin intervals on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(spinIntervalsRef.current).forEach(clearInterval);
+    };
+  }, []);
 
   const showMessage = (text, type) => {
     setMessage({ text, type });
@@ -362,7 +362,6 @@ function App() {
                   key={process.id}
                   className={`process-card process-card-${processStatus} ${isSpinLock ? 'spin-card' : ''}`}
                 >
-                  {/* Spinning Overlay */}
                   {processStatus === 'spinning' && (
                     <div className="spin-overlay">
                       <div className="spin-ring"></div>
