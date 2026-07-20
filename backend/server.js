@@ -6,174 +6,251 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Mutex implementation for process synchronization
+// ============ MUTEX CLASS ============
 class Mutex {
   constructor() {
     this.locked = false;
     this.waitingQueue = [];
-    this.processId = 0;
+    this.currentProcess = null;
   }
 
-  // Peterson's Algorithm for two processes
-  petersonLock(processId, turn) {
-    const other = 1 - processId;
-    const flag = [false, false];
-    
-    flag[processId] = true;
-    turn = other;
-    
-    while (flag[other] && turn === other) {
-      // Busy waiting
-    }
-    
-    // Critical section
-    return true;
-  }
-
-  petersonUnlock(processId) {
-    // Implementation would reset the flag
-  }
-
-  // Bakery Algorithm for N processes
-  bakeryLock(processId, n) {
-    const choosing = new Array(n).fill(false);
-    const number = new Array(n).fill(0);
-    
-    choosing[processId] = true;
-    
-    // Find max number and assign next
-    let maxNum = 0;
-    for (let i = 0; i < n; i++) {
-      if (number[i] > maxNum) {
-        maxNum = number[i];
-      }
-    }
-    number[processId] = maxNum + 1;
-    choosing[processId] = false;
-    
-    // Wait until it's our turn
-    for (let j = 0; j < n; j++) {
-      while (choosing[j]) { /* busy wait */ }
-      while (number[j] !== 0 && (number[j] < number[processId] || (number[j] === number[processId] && j < processId))) {
-        // busy wait
-      }
-    }
-    
-    return true;
-  }
-
-  // Simple mutex lock using atomic operations simulation
-  async acquireLock(processId, algorithm = 'simple') {
+  // Simple mutex: process sleeps in queue if lock not available
+  async acquire(processId) {
     return new Promise((resolve) => {
-      if (algorithm === 'spinlock') {
-        if (!this.locked) {
-          this.locked = true;
-          this.processId = processId;
-          resolve({ success: true, processId, message: `Process ${processId} acquired spin lock` });
-        } else {
-          resolve({ success: false, isSpinning: true, processId, message: `Process ${processId} spinning...` });
-        }
+      if (!this.locked) {
+        this.locked = true;
+        this.currentProcess = processId;
+        resolve({ 
+          success: true, 
+          processId, 
+          type: 'mutex',
+          message: `Process ${processId} acquired mutex lock` 
+        });
       } else {
-        if (!this.locked) {
-          this.locked = true;
-          this.processId = processId;
-          resolve({ success: true, processId, message: `Process ${processId} acquired lock` });
-        } else {
-          if (!this.waitingQueue.includes(processId)) {
-            this.waitingQueue.push(processId);
-          }
-          resolve({ success: false, processId, message: `Process ${processId} waiting in queue`, queue: [...this.waitingQueue] });
+        // Add to waiting queue (sleep)
+        if (!this.waitingQueue.includes(processId)) {
+          this.waitingQueue.push(processId);
         }
+        resolve({ 
+          success: false, 
+          processId, 
+          type: 'mutex',
+          message: `Process ${processId} added to waiting queue (sleeping)`, 
+          queue: [...this.waitingQueue] 
+        });
       }
     });
   }
 
-  releaseLock(processId) {
-    if (this.locked && this.processId === processId) {
+  release(processId) {
+    if (this.locked && this.currentProcess === processId) {
       this.locked = false;
-      this.processId = null;
+      this.currentProcess = null;
       
-      // Process next in queue
+      // Wake up next process in queue
       if (this.waitingQueue.length > 0) {
         const nextProcess = this.waitingQueue.shift();
         this.locked = true;
-        this.processId = nextProcess;
-        return { success: true, message: `Lock released. Process ${nextProcess} acquired lock`, nextProcess };
+        this.currentProcess = nextProcess;
+        return { 
+          success: true, 
+          type: 'mutex',
+          message: `Lock released. Process ${nextProcess} woken up and acquired lock`, 
+          nextProcess 
+        };
       }
       
-      return { success: true, message: `Process ${processId} released lock` };
+      return { success: true, type: 'mutex', message: `Process ${processId} released lock` };
     }
-    return { success: false, message: `Process ${processId} does not hold the lock` };
+    return { success: false, type: 'mutex', message: `Process ${processId} does not hold the lock` };
   }
 
   getStatus() {
     return {
+      type: 'mutex',
       locked: this.locked,
-      currentProcess: this.processId,
+      currentProcess: this.currentProcess,
       waitingQueue: [...this.waitingQueue],
       queueLength: this.waitingQueue.length
     };
   }
+
+  reset() {
+    this.locked = false;
+    this.currentProcess = null;
+    this.waitingQueue = [];
+  }
 }
 
-const mutex = new Mutex();
+// ============ SPIN LOCK CLASS ============
+class SpinLock {
+  constructor() {
+    this.locked = false;
+    this.currentProcess = null;
+    this.spinningProcesses = new Map(); // Track spinning processes and their spin counts
+  }
 
-// API Routes
+  // Spin lock: process busy waits (spins) until lock available
+  async acquire(processId) {
+    return new Promise((resolve) => {
+      if (!this.locked) {
+        this.locked = true;
+        this.currentProcess = processId;
+        this.spinningProcesses.delete(processId);
+        resolve({ 
+          success: true, 
+          processId, 
+          type: 'spinlock',
+          message: `Process ${processId} acquired spin lock`,
+          spinCount: this.spinningProcesses.get(processId) || 0
+        });
+      } else {
+        // Start spinning (busy waiting)
+        const currentSpins = this.spinningProcesses.get(processId) || 0;
+        this.spinningProcesses.set(processId, currentSpins + 1);
+        
+        resolve({ 
+          success: false, 
+          processId, 
+          type: 'spinlock',
+          isSpinning: true,
+          message: `Process ${processId} spinning... (busy waiting)`, 
+          spinCount: currentSpins + 1
+        });
+      }
+    });
+  }
+
+  release(processId) {
+    if (this.locked && this.currentProcess === processId) {
+      this.locked = false;
+      this.currentProcess = null;
+      
+      return { 
+        success: true, 
+        type: 'spinlock',
+        message: `Process ${processId} released spin lock` 
+      };
+    }
+    return { success: false, type: 'spinlock', message: `Process ${processId} does not hold the spin lock` };
+  }
+
+  getStatus() {
+    const spinning = [];
+    this.spinningProcesses.forEach((count, pid) => {
+      spinning.push({ processId: pid, spinCount: count });
+    });
+
+    return {
+      type: 'spinlock',
+      locked: this.locked,
+      currentProcess: this.currentProcess,
+      spinningProcesses: spinning,
+      spinningCount: spinning.length
+    };
+  }
+
+  reset() {
+    this.locked = false;
+    this.currentProcess = null;
+    this.spinningProcesses.clear();
+  }
+}
+
+// ============ INITIALIZE LOCKS ============
+const mutex = new Mutex();
+const spinLock = new SpinLock();
+
+// ============ MUTEX API ROUTES ============
 
 // Get mutex status
 app.get('/api/mutex/status', (req, res) => {
   res.json(mutex.getStatus());
 });
 
-// Acquire lock
+// Acquire mutex lock
 app.post('/api/mutex/lock', (req, res) => {
-  const { processId, algorithm } = req.body;
+  const { processId } = req.body;
   
-  if (!processId) {
+  if (!processId && processId !== 0) {
     return res.status(400).json({ error: 'Process ID is required' });
   }
   
-  mutex.acquireLock(processId, algorithm).then(result => {
+  mutex.acquire(processId).then(result => {
     res.json(result);
   });
 });
 
-// Release lock
+// Release mutex lock
 app.post('/api/mutex/unlock', (req, res) => {
   const { processId } = req.body;
   
-  if (!processId) {
+  if (!processId && processId !== 0) {
     return res.status(400).json({ error: 'Process ID is required' });
   }
   
-  const result = mutex.releaseLock(processId);
+  const result = mutex.release(processId);
   res.json(result);
 });
 
 // Reset mutex
 app.post('/api/mutex/reset', (req, res) => {
-  mutex.locked = false;
-  mutex.processId = null;
-  mutex.waitingQueue = [];
+  mutex.reset();
   res.json({ success: true, message: 'Mutex reset successfully' });
 });
 
-// Simulate multiple processes
-app.post('/api/mutex/simulate', (req, res) => {
-  const { numProcesses } = req.body;
-  const results = [];
+// ============ SPIN LOCK API ROUTES ============
+
+// Get spin lock status
+app.get('/api/spinlock/status', (req, res) => {
+  res.json(spinLock.getStatus());
+});
+
+// Acquire spin lock
+app.post('/api/spinlock/lock', (req, res) => {
+  const { processId } = req.body;
   
-  for (let i = 0; i < numProcesses; i++) {
-    results.push({
-      processId: i,
-      action: 'requesting',
-      timestamp: Date.now()
-    });
+  if (!processId && processId !== 0) {
+    return res.status(400).json({ error: 'Process ID is required' });
   }
   
-  res.json({ simulation: results, message: `Simulating ${numProcesses} processes` });
+  spinLock.acquire(processId).then(result => {
+    res.json(result);
+  });
+});
+
+// Release spin lock
+app.post('/api/spinlock/unlock', (req, res) => {
+  const { processId } = req.body;
+  
+  if (!processId && processId !== 0) {
+    return res.status(400).json({ error: 'Process ID is required' });
+  }
+  
+  const result = spinLock.release(processId);
+  res.json(result);
+});
+
+// Reset spin lock
+app.post('/api/spinlock/reset', (req, res) => {
+  spinLock.reset();
+  res.json({ success: true, message: 'Spin Lock reset successfully' });
+});
+
+// ============ HEALTH CHECK ============
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Mutex and Spin Lock API is running',
+    endpoints: {
+      mutex: ['/api/mutex/status', '/api/mutex/lock', '/api/mutex/unlock', '/api/mutex/reset'],
+      spinlock: ['/api/spinlock/status', '/api/spinlock/lock', '/api/spinlock/unlock', '/api/spinlock/reset']
+    }
+  });
 });
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Mutex API: http://localhost:${PORT}/api/mutex`);
+  console.log(`Spin Lock API: http://localhost:${PORT}/api/spinlock`);
 });

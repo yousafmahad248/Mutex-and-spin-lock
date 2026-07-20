@@ -1,32 +1,44 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import './index.css';
 
-const API_BASE = process.env.REACT_APP_API_URL || 'https://mutex-and-spin-lock.onrender.com/api/mutex';
+const API_BASE = process.env.REACT_APP_API_URL || 'https://mutex-and-spin-lock.onrender.com';
 
 function App() {
-  const [status, setStatus] = useState({
-    locked: false,
-    currentProcess: null,
-    waitingQueue: [],
-    queueLength: 0
-  });
+  const [mode, setMode] = useState('mutex'); // 'mutex' or 'spinlock'
+  const [status, setStatus] = useState(null);
   const [message, setMessage] = useState({ text: '', type: '' });
   const [processes, setProcesses] = useState([]);
   const [numProcesses, setNumProcesses] = useState(3);
-  const [algorithm, setAlgorithm] = useState('simple');
+  const [spinCounts, setSpinCounts] = useState({});
+  const spinIntervalsRef = useRef({});
 
-  // Fetch mutex status periodically
+  // Fetch status periodically
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 1000);
+    const interval = setInterval(fetchStatus, 800);
     return () => clearInterval(interval);
+  }, [mode]);
+
+  // Cleanup spin intervals on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(spinIntervalsRef.current).forEach(clearInterval);
+    };
   }, []);
 
   const fetchStatus = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/status`);
-      setStatus(response.data);
+      // Use /api/mutex/status for both modes
+      const response = await axios.get(`${API_BASE}/api/mutex/status`);
+      const data = response.data;
+      
+      // Add type field if missing (backward compatibility with old backend)
+      if (!data.type) {
+        data.type = mode;
+      }
+      
+      setStatus(data);
     } catch (error) {
       console.error('Error fetching status:', error);
     }
@@ -38,76 +50,85 @@ function App() {
   };
 
   const initializeProcesses = () => {
+    // Clear any existing spin intervals
+    Object.values(spinIntervalsRef.current).forEach(clearInterval);
+    spinIntervalsRef.current = {};
+    setSpinCounts({});
+
     const newProcesses = [];
     for (let i = 0; i < numProcesses; i++) {
       newProcesses.push({
-        id: i,
-        status: 'idle', // idle, active, waiting
+        id: i + 1, // Use 1-based indexing for deployed backend compatibility
+        status: 'idle',
         hasLock: false
       });
     }
     setProcesses(newProcesses);
-    showMessage(`${numProcesses} processes initialized`, 'info');
+    showMessage(`${numProcesses} processes initialized for ${mode === 'mutex' ? 'Mutex' : 'Spin Lock'}`, 'info');
   };
 
-  const updateProcessState = (processId, status, hasLock) => {
+  const updateProcessState = (processId, newStatus, hasLock) => {
     setProcesses(prev => prev.map(p => {
       if (p.id === processId) {
-        return { ...p, status, hasLock };
+        return { ...p, status: newStatus, hasLock };
       }
       return p;
     }));
   };
 
-  const spin = (processId) => {
-    setTimeout(async () => {
-      setProcesses(currentProcesses => {
-        const p = currentProcesses.find(p => p.id === processId);
-        if (p && p.status === 'spinning') {
-          checkSpinLock(processId);
-        }
-        return currentProcesses;
-      });
-    }, 1000);
-  };
+  const startSpinning = (processId) => {
+    setSpinCounts(prev => ({ ...prev, [processId]: 1 }));
 
-  const checkSpinLock = async (processId) => {
-    try {
-      const response = await axios.post(`${API_BASE}/lock`, {
-        processId,
-        algorithm: 'spinlock'
-      });
-      if (response.data.success) {
-        updateProcessState(processId, 'active', true);
-        fetchStatus();
-        showMessage(`Process ${processId} successfully acquired spin lock`, 'success');
-      } else {
-        spin(processId);
+    const intervalId = setInterval(async () => {
+      try {
+        // Use /api/mutex/lock with spinlock algorithm
+        const response = await axios.post(`${API_BASE}/api/mutex/lock`, {
+          processId,
+          algorithm: 'spinlock'
+        });
+
+        const data = response.data;
+        
+        setSpinCounts(prev => ({ ...prev, [processId]: (prev[processId] || 0) + 1 }));
+
+        if (data.success) {
+          clearInterval(intervalId);
+          delete spinIntervalsRef.current[processId];
+          updateProcessState(processId, 'active', true);
+          fetchStatus();
+          showMessage(`Process ${processId} acquired spin lock after ${spinCounts[processId] || 1} spins!`, 'success');
+        }
+      } catch (error) {
+        console.error('Spin error:', error);
       }
-    } catch (error) {
-      console.error('Error during spin:', error);
-    }
+    }, 1200);
+
+    spinIntervalsRef.current[processId] = intervalId;
   };
 
   const acquireLock = async (processId) => {
     try {
-      const response = await axios.post(`${API_BASE}/lock`, {
+      // Use /api/mutex/lock for both modes with algorithm parameter
+      // This ensures compatibility with deployed backend
+      const response = await axios.post(`${API_BASE}/api/mutex/lock`, {
         processId,
-        algorithm
+        algorithm: mode === 'spinlock' ? 'spinlock' : 'simple'
       });
+
+      const data = response.data;
       
-      if (response.data.success) {
-        showMessage(response.data.message, 'success');
+      if (data.success) {
+        showMessage(data.message, 'success');
         updateProcessState(processId, 'active', true);
-      } else if (response.data.isSpinning) {
-        showMessage(response.data.message, 'warning');
+      } else if (data.isSpinning) {
+        showMessage(`Process ${processId} is now spinning (busy waiting)...`, 'warning');
         updateProcessState(processId, 'spinning', false);
-        spin(processId);
+        startSpinning(processId);
       } else {
-        showMessage(response.data.message, 'error');
+        showMessage(data.message, 'error');
         updateProcessState(processId, 'waiting', false);
       }
-      
+
       fetchStatus();
     } catch (error) {
       showMessage('Error acquiring lock', 'error');
@@ -116,131 +137,189 @@ function App() {
 
   const releaseLock = async (processId) => {
     try {
-      const response = await axios.post(`${API_BASE}/unlock`, {
+      // Use /api/mutex/unlock for both modes
+      const response = await axios.post(`${API_BASE}/api/mutex/unlock`, {
         processId
       });
-      
+
       showMessage(response.data.message, response.data.success ? 'success' : 'error');
-      
-      // Update process status
+
       setProcesses(prev => prev.map(p => {
         if (p.id === processId) {
-          return {
-            ...p,
-            status: 'idle',
-            hasLock: false
-          };
+          return { ...p, status: 'idle', hasLock: false };
         }
         return p;
       }));
-      
+
       fetchStatus();
     } catch (error) {
       showMessage('Error releasing lock', 'error');
     }
   };
 
-  const resetMutex = async () => {
+  const resetLock = async () => {
     try {
-      await axios.post(`${API_BASE}/reset`);
+      // Use /api/mutex/reset for both modes
+      await axios.post(`${API_BASE}/api/mutex/reset`);
+
+      // Clear all spin intervals
+      Object.values(spinIntervalsRef.current).forEach(clearInterval);
+      spinIntervalsRef.current = {};
+      setSpinCounts({});
+
       setProcesses(prev => prev.map(p => ({
         ...p,
         status: 'idle',
         hasLock: false
       })));
-      showMessage('Mutex reset successfully', 'success');
+      showMessage(`${mode === 'mutex' ? 'Mutex' : 'Spin Lock'} reset successfully`, 'success');
       fetchStatus();
     } catch (error) {
-      showMessage('Error resetting mutex', 'error');
+      showMessage('Error resetting', 'error');
     }
   };
 
   const getProcessStatus = (processId) => {
     const process = processes.find(p => p.id === processId);
     if (!process) return 'idle';
-    
+
     if (process.hasLock) return 'active';
     if (process.status === 'spinning') return 'spinning';
-    if (status.waitingQueue.includes(processId)) return 'waiting';
+    if (status && status.waitingQueue && status.waitingQueue.includes(processId)) return 'waiting';
     return 'idle';
   };
 
+  const isSpinLock = mode === 'spinlock';
+
   return (
-    <div className="app">
-      <div className="header">
-        <h1>🔒 Mutex Algorithm Visualization</h1>
-        <p>Process Synchronization using Mutex Locks</p>
+    <div className={`app ${isSpinLock ? 'app-spinlock' : 'app-mutex'}`}>
+      {/* Tab Switcher */}
+      <div className="tab-switcher">
+        <button
+          className={`tab-btn ${!isSpinLock ? 'tab-active' : ''}`}
+          onClick={() => { setMode('mutex'); resetLock(); }}
+        >
+          🔒 Mutex Lock
+        </button>
+        <button
+          className={`tab-btn ${isSpinLock ? 'tab-active tab-active-spin' : ''}`}
+          onClick={() => { setMode('spinlock'); resetLock(); }}
+        >
+          🔄 Spin Lock
+        </button>
       </div>
 
+      {/* Header */}
+      <div className="header">
+        <h1>{isSpinLock ? '🔄 Spin Lock Visualization' : '🔒 Mutex Lock Visualization'}</h1>
+        <p>{isSpinLock ? 'Process Synchronization using Busy Waiting' : 'Process Synchronization using Mutex Locks'}</p>
+      </div>
+
+      {/* Message */}
       {message.text && (
         <div className={`message message-${message.type}`}>
           {message.text}
         </div>
       )}
 
-      <div className="algorithm-info">
-        <h3>📚 About Mutex Algorithm</h3>
-        <p>
-          A <strong>Mutex (Mutual Exclusion)</strong> is a synchronization mechanism that ensures 
-          only one process can access a critical section at a time. When a process acquires a mutex lock, 
-          other processes must wait until the lock is released. This prevents race conditions and ensures 
-          data consistency in concurrent systems.
-        </p>
+      {/* Info Panel */}
+      <div className={`algorithm-info ${isSpinLock ? 'info-spinlock' : ''}`}>
+        <h3>{isSpinLock ? '⚡ About Spin Lock' : '📚 About Mutex Lock'}</h3>
+        {isSpinLock ? (
+          <p>
+            A <strong>Spin Lock</strong> is a synchronization mechanism where a process continuously
+            checks (spins) in a loop until the lock becomes available. Unlike mutex, the process does
+            <strong> NOT sleep</strong> — it keeps the CPU busy with active polling. This is efficient
+            for <strong>short wait times</strong> but wastes CPU cycles for longer waits.
+            Watch the spin counter increase as processes actively poll!
+          </p>
+        ) : (
+          <p>
+            A <strong>Mutex (Mutual Exclusion)</strong> is a synchronization mechanism that ensures
+            only one process can access a critical section at a time. When a process acquires a mutex lock,
+            other processes are put into a <strong>waiting queue</strong> and go to sleep. This prevents
+            race conditions and ensures data consistency in concurrent systems.
+          </p>
+        )}
       </div>
 
+      {/* Controls */}
       <div className="controls">
-        <div>
-          <select 
-            value={algorithm} 
-            onChange={(e) => setAlgorithm(e.target.value)}
-            style={{ padding: '12px', marginRight: '10px', borderRadius: '5px', border: '1px solid #ccc' }}
-          >
-            <option value="simple">Mutex (Queue)</option>
-            <option value="spinlock">Spin Lock (Busy Wait)</option>
-          </select>
+        <div className="controls-left">
           <input
             type="number"
             min="2"
             max="10"
             value={numProcesses}
             onChange={(e) => setNumProcesses(parseInt(e.target.value))}
-            style={{ padding: '12px', width: '60px', marginRight: '10px', borderRadius: '5px', border: '1px solid #ccc' }}
+            className="num-input"
           />
-          <button className="btn-primary" onClick={initializeProcesses}>
+          <button className={`btn-primary ${isSpinLock ? 'btn-spin-primary' : ''}`} onClick={initializeProcesses}>
             Initialize Processes
           </button>
         </div>
-        <button className="btn-danger" onClick={resetMutex}>
-          Reset Mutex
+        <button className="btn-danger" onClick={resetLock}>
+          Reset All
         </button>
       </div>
 
-      <div className="status-panel">
-        <h2>📊 Mutex Status</h2>
-        <div className="status-item">
-          <span className="status-label">Lock Status:</span>
-          <span className="status-value" style={{ color: status.locked ? '#dc3545' : '#28a745' }}>
-            {status.locked ? '🔒 LOCKED' : '🔓 UNLOCKED'}
-          </span>
+      {/* Lock Visual */}
+      {status && (
+        <div className="lock-visual">
+          <div className={`lock-icon-big ${status.locked ? 'locked' : 'unlocked'}`}>
+            <span className="lock-emoji">{status.locked ? '🔒' : '🔓'}</span>
+            <span className="lock-text">{status.locked ? 'LOCKED' : 'UNLOCKED'}</span>
+            {status.currentProcess !== null && (
+              <span className="lock-owner">by Process {status.currentProcess}</span>
+            )}
+          </div>
         </div>
-        <div className="status-item">
-          <span className="status-label">Current Process:</span>
-          <span className="status-value">
-            {status.currentProcess !== null ? `Process ${status.currentProcess}` : 'None'}
-          </span>
-        </div>
-        <div className="status-item">
-          <span className="status-label">Queue Length:</span>
-          <span className="status-value">{status.queueLength}</span>
-        </div>
-      </div>
+      )}
 
-      {status.waitingQueue.length > 0 && (
+      {/* Status Panel */}
+      {status && (
+        <div className={`status-panel ${isSpinLock ? 'status-panel-spin' : ''}`}>
+          <h2>{isSpinLock ? '⚡ Lock Status' : '📊 Mutex Status'}</h2>
+          <div className="status-grid">
+            <div className="status-card">
+              <div className="status-card-label">Lock State</div>
+              <div className={`status-card-value ${status.locked ? 'text-red' : 'text-green'}`}>
+                {status.locked ? 'LOCKED' : 'FREE'}
+              </div>
+            </div>
+            <div className="status-card">
+              <div className="status-card-label">Owner</div>
+              <div className="status-card-value">
+                {status.currentProcess !== null ? `P${status.currentProcess}` : '—'}
+              </div>
+            </div>
+            <div className="status-card">
+              <div className="status-card-label">{isSpinLock ? 'Spinning' : 'Queue'}</div>
+              <div className="status-card-value">
+                {isSpinLock
+                  ? status.spinningCount || 0
+                  : status.queueLength
+                }
+              </div>
+            </div>
+            <div className="status-card">
+              <div className="status-card-label">Mode</div>
+              <div className={`status-card-value ${isSpinLock ? 'text-cyan' : 'text-purple'}`}>
+                {isSpinLock ? 'SPIN' : 'MUTEX'}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Waiting Queue (Mutex only) */}
+      {!isSpinLock && status && status.waitingQueue && status.waitingQueue.length > 0 && (
         <div className="queue-display">
           <h3>⏳ Waiting Queue</h3>
           <div className="queue-list">
             {status.waitingQueue.map((processId, index) => (
               <div key={index} className="queue-item">
+                <span className="queue-pos">#{index + 1}</span>
                 Process {processId}
               </div>
             ))}
@@ -248,6 +327,30 @@ function App() {
         </div>
       )}
 
+      {/* Spinning Processes (Spin Lock only) */}
+      {isSpinLock && status && status.spinningProcesses && status.spinningProcesses.length > 0 && (
+        <div className="spin-monitor">
+          <h3>🔄 Active Spinners</h3>
+          <div className="spinner-list">
+            {status.spinningProcesses.map(p => (
+              <div key={p.processId} className="spinner-item">
+                <div className="spinner-icon-container">
+                  <div className="spinner-anim"></div>
+                </div>
+                <div className="spinner-details">
+                  <span className="spinner-name">Process {p.processId}</span>
+                  <span className="spinner-count">Spin #{p.spinCount}</span>
+                </div>
+                <div className="spinner-bar">
+                  <div className="spinner-bar-fill" style={{ width: `${Math.min(p.spinCount * 10, 100)}%` }}></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Process Cards */}
       {processes.length > 0 && (
         <div className="processes-container">
           <h2>⚙️ Processes</h2>
@@ -257,28 +360,48 @@ function App() {
               return (
                 <div
                   key={process.id}
-                  className={`process-card ${processStatus === 'active' ? 'active' : ''} ${processStatus === 'waiting' ? 'waiting' : ''} ${processStatus === 'spinning' ? 'spinning' : ''}`}
+                  className={`process-card process-card-${processStatus} ${isSpinLock ? 'spin-card' : ''}`}
                 >
+                  {/* Spinning Overlay */}
+                  {processStatus === 'spinning' && (
+                    <div className="spin-overlay">
+                      <div className="spin-ring"></div>
+                      <div className="spin-count-badge">#{spinCounts[process.id] || 0}</div>
+                    </div>
+                  )}
+
                   <div className="process-header">
-                    <span className="process-id">Process {process.id}</span>
+                    <span className="process-id">
+                      {processStatus === 'spinning' && <span className="spin-dot"></span>}
+                      Process {process.id}
+                    </span>
                     <span className={`process-status status-${processStatus}`}>
-                      {processStatus.toUpperCase()}
+                      {processStatus === 'spinning' ? `SPINNING` : processStatus.toUpperCase()}
                     </span>
                   </div>
+
+                  {processStatus === 'spinning' && (
+                    <div className="spin-info">
+                      <div className="spin-loop-text">
+                        while(lock == 1) {'{'} /* busy wait */ {'}'}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="process-actions">
                     <button
-                      className="btn-success"
+                      className={`${isSpinLock ? 'btn-spin-acquire' : 'btn-success'}`}
                       onClick={() => acquireLock(process.id)}
                       disabled={processStatus === 'active' || processStatus === 'waiting' || processStatus === 'spinning'}
                     >
-                      Acquire Lock
+                      {isSpinLock ? '⚡ Acquire' : '🔒 Acquire'}
                     </button>
                     <button
                       className="btn-warning"
                       onClick={() => releaseLock(process.id)}
                       disabled={processStatus !== 'active'}
                     >
-                      Release Lock
+                      🔓 Release
                     </button>
                   </div>
                 </div>
@@ -287,6 +410,47 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Comparison Table */}
+      <div className="comparison-section">
+        <h2>📋 Mutex vs Spin Lock</h2>
+        <table className="comparison-table">
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th className={!isSpinLock ? 'highlight-col' : ''}>Mutex Lock</th>
+              <th className={isSpinLock ? 'highlight-col-spin' : ''}>Spin Lock</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Wait Method</td>
+              <td className={!isSpinLock ? 'highlight-col' : ''}>Sleep (Queue)</td>
+              <td className={isSpinLock ? 'highlight-col-spin' : ''}>Busy Wait (Loop)</td>
+            </tr>
+            <tr>
+              <td>CPU Usage</td>
+              <td className={!isSpinLock ? 'highlight-col' : ''}>Low</td>
+              <td className={isSpinLock ? 'highlight-col-spin' : ''}>High</td>
+            </tr>
+            <tr>
+              <td>Context Switch</td>
+              <td className={!isSpinLock ? 'highlight-col' : ''}>Yes</td>
+              <td className={isSpinLock ? 'highlight-col-spin' : ''}>No</td>
+            </tr>
+            <tr>
+              <td>Best For</td>
+              <td className={!isSpinLock ? 'highlight-col' : ''}>Long waits</td>
+              <td className={isSpinLock ? 'highlight-col-spin' : ''}>Short waits</td>
+            </tr>
+            <tr>
+              <td>Overhead</td>
+              <td className={!isSpinLock ? 'highlight-col' : ''}>High (sleep/wake)</td>
+              <td className={isSpinLock ? 'highlight-col-spin' : ''}>Low (no switching)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
