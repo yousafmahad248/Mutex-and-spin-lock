@@ -15,14 +15,10 @@ function App() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      // Use /api/mutex/status for both modes
-      const response = await axios.get(`${API_BASE}/api/mutex/status`);
+      // Use appropriate endpoint based on mode
+      const endpoint = mode === 'spinlock' ? '/api/spinlock/status' : '/api/mutex/status';
+      const response = await axios.get(`${API_BASE}${endpoint}`);
       const data = response.data;
-      
-      // Add type field if missing (backward compatibility with old backend)
-      if (!data.type) {
-        data.type = mode;
-      }
       
       setStatus(data);
     } catch (error) {
@@ -81,10 +77,9 @@ function App() {
 
     const intervalId = setInterval(async () => {
       try {
-        // Use /api/mutex/lock with spinlock algorithm
-        const response = await axios.post(`${API_BASE}/api/mutex/lock`, {
-          processId,
-          algorithm: 'spinlock'
+        // Use spinlock endpoint for spinning
+        const response = await axios.post(`${API_BASE}/api/spinlock/lock`, {
+          processId
         });
 
         const data = response.data;
@@ -108,11 +103,10 @@ function App() {
 
   const acquireLock = async (processId) => {
     try {
-      // Use /api/mutex/lock for both modes with algorithm parameter
-      // This ensures compatibility with deployed backend
-      const response = await axios.post(`${API_BASE}/api/mutex/lock`, {
-        processId,
-        algorithm: mode === 'spinlock' ? 'spinlock' : 'simple'
+      // Use appropriate endpoint based on mode
+      const endpoint = mode === 'spinlock' ? '/api/spinlock/lock' : '/api/mutex/lock';
+      const response = await axios.post(`${API_BASE}${endpoint}`, {
+        processId
       });
 
       const data = response.data;
@@ -137,8 +131,9 @@ function App() {
 
   const releaseLock = async (processId) => {
     try {
-      // Use /api/mutex/unlock for both modes
-      const response = await axios.post(`${API_BASE}/api/mutex/unlock`, {
+      // Use appropriate endpoint based on mode
+      const endpoint = mode === 'spinlock' ? '/api/spinlock/unlock' : '/api/mutex/unlock';
+      const response = await axios.post(`${API_BASE}${endpoint}`, {
         processId
       });
 
@@ -159,8 +154,9 @@ function App() {
 
   const resetLock = async () => {
     try {
-      // Use /api/mutex/reset for both modes
-      await axios.post(`${API_BASE}/api/mutex/reset`);
+      // Use appropriate endpoint based on mode
+      const endpoint = mode === 'spinlock' ? '/api/spinlock/reset' : '/api/mutex/reset';
+      await axios.post(`${API_BASE}${endpoint}`);
 
       // Clear all spin intervals
       Object.values(spinIntervalsRef.current).forEach(clearInterval);
