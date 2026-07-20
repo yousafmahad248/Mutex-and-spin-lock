@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import './index.css';
 
@@ -13,7 +13,7 @@ function App() {
   const [spinCounts, setSpinCounts] = useState({});
   const spinIntervalsRef = useRef({});
 
-  const fetchStatus = useCallback(async () => {
+  const fetchStatus = async () => {
     try {
       // Use /api/mutex/status for both modes
       const response = await axios.get(`${API_BASE}/api/mutex/status`);
@@ -28,14 +28,14 @@ function App() {
     } catch (error) {
       console.error('Error fetching status:', error);
     }
-  }, [API_BASE, mode]);
+  };
 
   // Fetch status periodically
   useEffect(() => {
     fetchStatus();
     const interval = setInterval(fetchStatus, 800);
     return () => clearInterval(interval);
-  }, [fetchStatus]);
+  }, [mode]);
 
   // Cleanup spin intervals on unmount
   useEffect(() => {
@@ -382,7 +382,7 @@ function App() {
                   {processStatus === 'spinning' && (
                     <div className="spin-info">
                       <div className="spin-loop-text">
-                        while(lock == 1) {'{'} /* busy wait */ {'}'}
+                        while(lock == 1) {'{'} {'{'} {'}'} {'}'}
                       </div>
                     </div>
                   )}
